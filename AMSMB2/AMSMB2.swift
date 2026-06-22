@@ -1735,3 +1735,70 @@ extension SMB2Manager {
         try file.fsync()
     }
 }
+
+// MARK: - Persistent reader (FinePlayer fork)
+//
+// `contents(atPath:range:)` opens, reads, and closes a fresh handle on every call —
+// three round-trips per read. For high-frequency ranged reads (streaming media) the
+// open/close is pure overhead. `SMB2FileReader` opens the file once and serves
+// positioned reads on the live handle: ~1 round-trip per read.
+//
+// Reuse one reader per connection; reads on a single reader must not overlap (the
+// SMB2 context is single-op), which matches "one read per connection at a time".
+public final class SMB2FileReader: @unchecked Sendable {
+    private weak var manager: SMB2Manager?
+    private let handle: SMB2FileHandle
+
+    fileprivate init(handle: SMB2FileHandle, manager: SMB2Manager) {
+        self.handle = handle
+        self.manager = manager
+    }
+
+    /// Read up to `length` bytes at absolute `offset`, looping until the full length
+    /// is read or EOF.
+    public func read(offset: UInt64, length: Int) async throws -> Data {
+        guard let manager else { throw POSIXError(.EBADF) }
+        return try await manager.preadFull(handle: handle, offset: offset, length: length)
+    }
+
+    /// Close the handle (call once, when done with the file).
+    public func close() {
+        manager?.closeHandle(handle)
+    }
+}
+
+extension SMB2Manager {
+    /// Open a persistent read handle on this connection. Reuse the returned reader
+    /// for many positioned reads to avoid per-read open/close round-trips.
+    public func openForReading(atPath path: String) async throws -> SMB2FileReader {
+        try await withCheckedThrowingContinuation { continuation in
+            self.with(completionHandler: { (result: Result<SMB2FileReader, any Error>) in
+                continuation.resume(with: result)
+            }) { client in
+                let handle = try SMB2FileHandle(forReadingAtPath: path, on: client)
+                return SMB2FileReader(handle: handle, manager: self)
+            }
+        }
+    }
+
+    fileprivate func preadFull(handle: SMB2FileHandle, offset: UInt64, length: Int) async throws -> Data {
+        try await withCheckedThrowingContinuation { continuation in
+            self.with(completionHandler: { (result: Result<Data, any Error>) in
+                continuation.resume(with: result)
+            }) { _ in
+                var out = Data(capacity: length)
+                while out.count < length {
+                    let chunk = try handle.pread(offset: offset + UInt64(out.count),
+                                                length: length - out.count)
+                    if chunk.isEmpty { break }   // EOF
+                    out.append(chunk)
+                }
+                return out
+            }
+        }
+    }
+
+    fileprivate func closeHandle(_ handle: SMB2FileHandle) {
+        self.queue { try? handle.close() }
+    }
+}

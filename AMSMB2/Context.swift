@@ -209,6 +209,13 @@ extension SMB2Client {
     func service(revents: Int32) throws {
         let result = smb2_service(context, revents)
         if result < 0 {
+            // This is the OTHER context-destroying path besides deinit — and unlike deinit, it runs
+            // UNCONDITIONALLY the instant smb2_service reports an error, without checking whether this
+            // SAME call already dispatched a generic_handler callback earlier in its OWN processing pass
+            // (smb2_service can service multiple pending PDUs in one call). If it did, and that callback's
+            // closure is still executing or about to run its OWN logic against `smb2`/`context` after this
+            // destroy — that's a same-call-stack use-after-free, not a cross-thread race (which
+            // _context_lock already rules out).
             smb2_destroy_context(context)
             context = nil
             try POSIXError.throwIfError(result, description: error)
@@ -384,6 +391,16 @@ extension SMB2Client {
     }
 
     static let generic_handler: smb2_command_cb = { smb2, status, command_data, cbdata in
+        // THE crash site (2026-08-28): a prior real capture showed EXC_BAD_ACCESS reading `.pointee.fd`
+        // right below, consistent with `smb2` pointing at memory that's already been freed
+        // (smb2_destroy_context, from either deinit or service()'s error branch above). A bounded
+        // fputs(stderr)-based diagnostic (logging this callback's own entry, plus deinit/service()'s
+        // destroy-context path) lived here 2026-08-28 through 2026-09-02 to pin this down; removed once
+        // two subsequent real crashes were both root-caused via other signals without ever needing this
+        // data, and because it fired on every libsmb2 command completion (thousands/minute during
+        // ordinary playback) with no file-only routing available for raw `fputs`, which flooded the
+        // host app's console — see the host app's own commit history for the full removal rationale if
+        // this crash class ever needs a fresh, deliberately time-boxed diagnostic pass again.
         do {
             guard try smb2.unwrap().pointee.fd >= 0 else { return }
             let cbdata = try cbdata.unwrap().bindMemory(to: CBData.self, capacity: 1).pointee

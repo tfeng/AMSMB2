@@ -1,17 +1,26 @@
 # FinePlayer fork of AMSMB2
 
-Fork of [amosavian/AMSMB2](https://github.com/amosavian/AMSMB2) **4.0.3**, published
-under the moving tag **`4.0.3-fineplayer`** (force-recreated to point at the latest
-fork commit). The Xcode project pins that tag; when it moves, clean the SwiftPM cache
-and rebuild.
+Fork of [amosavian/AMSMB2](https://github.com/amosavian/AMSMB2) **4.0.3**, tracked on
+the `FXPlayer` branch. The Xcode project (`project.yml`) pins a specific commit on
+that branch via `revision:`, not the branch tip itself — bump the revision there when
+this branch moves.
 
 Two divergences from upstream 4.0.3:
 
 ## 1. libsmb2 submodule -> tfeng/libsmb2 (QUERY_DIRECTORY buffer)
 
 `Dependencies/libsmb2` points at [tfeng/libsmb2](https://github.com/tfeng/libsmb2)
-branch `fineplayer` = the exact revision 4.0.3 pins (`aff9fa6`, libsmb2-6.2-110) plus
-one patch. Upstream hard-codes `req.output_buffer_length = DEFAULT_OUTPUT_BUFFER_LENGTH`
+branch `FXPlayer` = upstream `master` as of 2026-10-24 (`c51b6a6`) plus one patch.
+Rebased onto current upstream from the prior base (`aff9fa6`, Aug 2025) to pick up
+~400 commits of accumulated fixes this fork had missed for over a year — notably the
+PR #431 security fixes (`5e75eeb`/`883e787`: OOB write in `smb2_add_iovector` via
+chained PDUs, CVE-2025-57632; `70754b0`: NULL deref in `dcerpc_bind_async`; `d0801c5`:
+off-by-one in compat `strdup`), the heap OOB read in `smb2_decode_file_all_info`
+(`588a779`), and `b4a409e` ("Free everything when a call is cancelled or the context
+is destroyed") — the closest upstream fix to a device crash this fork was carrying in
+`smb2_read_data`/`smb2_service_fd`.
+
+Upstream hard-codes `req.output_buffer_length = DEFAULT_OUTPUT_BUFFER_LENGTH`
 (64 KB) in both `opendir_cb` and the `query_cb` continuation, so a ~48k-file directory
 needs ~110 round-trips (~35 s). Patched to request up to the negotiated max transact
 size, capped at 1 MB, gated on `smb2->supports_multi_credit` (SMB 2.0.2 falls back to
@@ -27,6 +36,7 @@ single reader must not overlap). Search `"Persistent reader"` in AMSMB2.swift.
 
 ## Re-syncing with upstream
 
-To bump: re-fork libsmb2 at the new pinned revision, re-apply the two
-`output_buffer_length` edits (search `DEFAULT_OUTPUT_BUFFER_LENGTH` in the directory
-functions); the reader uses only public AMSMB2 APIs.
+To bump: rebase `tfeng/libsmb2`'s `FXPlayer` branch onto the new upstream commit,
+re-apply the `output_buffer_length` patch (search `DEFAULT_OUTPUT_BUFFER_LENGTH` in the
+directory functions — two call sites, in `opendir_cb` and `query_cb`), push, then bump
+the submodule pointer here and the `revision:` in FXPlayer's `project.yml` to match.

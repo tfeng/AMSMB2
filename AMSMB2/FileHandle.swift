@@ -131,8 +131,11 @@ final class SMB2FileHandle: @unchecked Sendable {
     func close() {
         guard let handle = handle else { return }
         self.handle = nil
-        _ = try? client.withThreadSafeContext { context in
-            smb2_close(context, handle)
+        // Async, bounded by `client.timeout` (2026-10-24): the sync `smb2_close` waits with no timeout of
+        // its own (smb2->timeout is never set), so a silent server blocked this thread forever while holding
+        // the context lock. close_cb frees the fh on success, error and shutdown alike.
+        _ = try? client.async_await { context, cbPtr -> Int32 in
+            smb2_close_async(context, handle, SMB2Client.generic_handler, cbPtr)
         }
     }
 

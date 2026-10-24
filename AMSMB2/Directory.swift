@@ -29,6 +29,8 @@ final class SMB2Directory: Collection {
     }
 
     deinit {
+        // If the context was already destroyed (connection died), this throws and the dir's entry list
+        // leaks — accepted: libsmb2 no longer bulk-frees open dirs on destroy (upstream c5613b7).
         try? client.withThreadSafeContext { context in
             smb2_closedir(context, handle)
         }

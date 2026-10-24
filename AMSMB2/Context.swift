@@ -15,6 +15,14 @@ final class SMB2Client: CustomDebugStringConvertible, CustomReflectable, @unchec
     var context: UnsafeMutablePointer<smb2_context>?
     private var _context_lock = NSRecursiveLock()
     var timeout: TimeInterval
+    /// Set when a call is abandoned on ETIMEDOUT (2026-10-24). Nothing cancels the abandoned PDU: it stays
+    /// queued in libsmb2 with callback data pointing at that call's (now dead) stack frame and, for reads,
+    /// at a buffer that's been freed. Servicing this context again would let a late reply write into that
+    /// memory and run `generic_handler` with stale callback data. So once set: every later call fails fast
+    /// with ENOTCONN without touching the socket, `isConnected` reports false (callers reconnect with a
+    /// fresh client), and deinit skips the network disconnect. `smb2_destroy_context` stays safe — it
+    /// closes the fd before running SHUTDOWN callbacks, so `generic_handler` returns early.
+    private(set) var poisoned = false
 
     init(timeout: TimeInterval) throws {
         self.context = try smb2_init_context().unwrap()
@@ -179,6 +187,7 @@ extension SMB2Client {
     }
 
     var fileDescriptor: Int32 {
+        if poisoned { return -1 }
         do {
             return try smb2_get_fd(context.unwrap())
         } catch {
@@ -373,18 +382,33 @@ extension SMB2Client {
             pfd.fd = fileDescriptor
             pfd.events = try whichEvents()
 
-            if pfd.fd < 0 || (poll(&pfd, 1, 1000) < 0 && errno != EAGAIN) {
+            if pfd.fd < 0 {
                 throw POSIXError(.init(errno), description: error)
+            }
+            if poll(&pfd, 1, 1000) < 0 {
+                // The C errno — `errno` alone resolves to this class's NT-status-derived property.
+                let pollErrno = Foundation.errno
+                if pollErrno == EINTR || pollErrno == EAGAIN { continue }
+                throw POSIXError(.init(pollErrno), description: error)
             }
 
             if pfd.revents == 0 {
                 if timeout > 0, Date().timeIntervalSince(startDate) > timeout {
+                    poisoned = true   // the PDU stays queued; see `poisoned`
                     throw POSIXError(.ETIMEDOUT)
                 }
                 continue
             }
 
-            try service(revents: Int32(pfd.revents))
+            do {
+                try service(revents: Int32(pfd.revents))
+            } catch {
+                // smb2_service can complete our PDU and then fail on a later one in the same pass
+                // (upstream ee56559). The operation did succeed — report it; the next call sees the dead
+                // connection. Throwing here made a completed rename/unlink look failed and get retried.
+                if cb.isFinished { return }
+                throw error
+            }
         }
     }
 
@@ -416,6 +440,12 @@ extension SMB2Client {
         _ context: UnsafeMutablePointer<smb2_context>, _ dataPtr: UnsafeMutableRawPointer?
     ) throws -> R
 
+    private func throwIfPoisoned() throws {
+        if poisoned {
+            throw POSIXError(.ENOTCONN, description: "SMB connection retired after an abandoned timed-out request")
+        }
+    }
+
     @discardableResult
     func async_await(execute handler: UnsafeContextHandler<Int32>) throws -> Int32 {
         try async_await(dataHandler: { _, _ in }, execute: handler).result
@@ -429,6 +459,7 @@ extension SMB2Client {
         throws -> (result: Int32, data: DataType)
     {
         try withThreadSafeContext { context -> (Int32, DataType) in
+            try throwIfPoisoned()
             var cb = CBData()
             var resultData: DataType?
             var dataHandlerError: (any Error)?
@@ -467,6 +498,7 @@ extension SMB2Client {
         throws -> (status: UInt32, data: DataType)
     {
         try withThreadSafeContext { context -> (UInt32, DataType) in
+            try throwIfPoisoned()
             var cb = CBData()
             var resultData: DataType?
             var dataHandlerError: (any Error)?

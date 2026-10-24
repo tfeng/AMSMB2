@@ -348,8 +348,12 @@ public class SMB2Manager: NSObject, NSSecureCoding, Codable, NSCopying, CustomRe
         completionHandler: @Sendable @escaping (_ result: Result<[(name: String, comment: String)], any Error>) -> Void
     ) {
         // Connecting to Interprocess Communication share
+        // `shareEnum()` (DCE-RPC-based) is gone -- upstream split that out into a separate libdcerpc
+        // library this fork doesn't vendor. `shareEnumSwift()` is the pure-Swift reimplementation of the
+        // same SRVSVC NetShareEnum wire protocol, already exercised by AMSMB2Tests (previously only
+        // reachable via the test-only `_swift_listShares`); same result type, no DCE-RPC dependency.
         with(shareName: "IPC$", encrypted: false, completionHandler: completionHandler) { client in
-            try client.shareEnum().map(enumerateHidden: enumerateHidden)
+            try client.shareEnumSwift().map(enumerateHidden: enumerateHidden)
         }
     }
 

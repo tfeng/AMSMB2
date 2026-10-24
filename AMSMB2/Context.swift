@@ -235,10 +235,14 @@ extension SMB2Client {
     }
 
     func disconnect() throws {
+        // `smb2_free_all_dirs`/`smb2_free_all_fhs` no longer exist upstream (libsmb2 commits
+        // c5613b7/daa92d9, 2025-10): the context stopped tracking a global list of open dirs/file
+        // handles at all -- "applications are supposed to clean up after themselves." AMSMB2's own
+        // `Directory`/`SMB2FileHandle` wrapper classes already own and close/free what they opened via
+        // their own ARC lifecycle; this was only ever a defensive bulk-sweep on top of that, never the
+        // sole cleanup mechanism, so dropping it is safe.
         try async_await { context, cbPtr -> Int32 in
-            smb2_free_all_dirs(context)
-            smb2_free_all_fhs(context)
-            return smb2_disconnect_share_async(context, SMB2Client.generic_handler, cbPtr)
+            smb2_disconnect_share_async(context, SMB2Client.generic_handler, cbPtr)
         }
     }
 
@@ -255,12 +259,6 @@ extension SMB2Client {
 // MARK: DCE-RPC
 
 extension SMB2Client {
-    func shareEnum() throws -> [SMB2Share] {
-        try async_await(dataHandler: [SMB2Share].init) { context, cbPtr -> Int32 in
-            smb2_share_enum_async(context, SHARE_INFO_1, SMB2Client.generic_handler, cbPtr)
-        }.data
-    }
-
     func shareEnumSwift() throws -> [SMB2Share] {
         // Connection to server service.
         let srvsvc = try SMB2FileHandle(path: "srvsvc", desiredAccess: [.read, .write], createDisposition: .open, on: self)
@@ -583,12 +581,20 @@ struct ShareProperties: RawRepresentable {
         ShareType(rawValue: rawValue & 0x0fff_ffff)!
     }
 
+    // Stable [MS-SRVS] wire constants, hardcoded rather than taken from a C header: the DCE-RPC
+    // `SHARE_TYPE_TEMPORARY`/`SHARE_TYPE_HIDDEN` macros this used to read lived in the now-unvendored
+    // libdcerpc; libsmb2's own replacement header (include/smb2/libsmb2-share-enum.h) defines the exact
+    // same two values under new names (SMB2_SHARE_TYPE_TEMPORARY/HIDDEN) for its native, non-DCE-RPC
+    // share-enum API, confirming these bits are a protocol constant, not a DCE-RPC-library-specific one.
+    private static let shareTypeTemporary: UInt32 = 0x4000_0000
+    private static let shareTypeHidden: UInt32 = 0x8000_0000
+
     var isTemporary: Bool {
-        rawValue & UInt32(bitPattern: SHARE_TYPE_TEMPORARY) != 0
+        rawValue & Self.shareTypeTemporary != 0
     }
 
     var isHidden: Bool {
-        rawValue & SHARE_TYPE_HIDDEN != 0
+        rawValue & Self.shareTypeHidden != 0
     }
 }
 

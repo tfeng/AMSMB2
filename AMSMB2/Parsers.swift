@@ -22,25 +22,11 @@ extension String {
     }
 }
 
-extension Array where Element == SMB2Share {
-    init(_ client: SMB2Client, _ dataPtr: UnsafeMutableRawPointer?) throws {
-        defer { smb2_free_data(client.context, dataPtr) }
-        let result = try dataPtr.unwrap().assumingMemoryBound(to: srvsvc_NetrShareEnum_rep.self).pointee
-        self = Array(result.ses.ShareInfo.Level1.Buffer.pointee)
-    }
-
-    init(_ ctr1: srvsvc_SHARE_INFO_1_carray) {
-        self = [srvsvc_SHARE_INFO_1](
-            UnsafeBufferPointer(start: ctr1.share_info_1, count: Int(ctr1.max_count))
-        ).map {
-            SMB2Share(
-                name: .init(cString: $0.netname.utf8),
-                props: .init(rawValue: $0.type),
-                comment: .init(cString: $0.remark.utf8)
-            )
-        }
-    }
-}
+// The `Array<SMB2Share>.init(_ client:_ dataPtr:)`/`.init(_ ctr1:)` pair that used to live here parsed
+// the DCE-RPC `srvsvc_NetrShareEnum_rep`/`srvsvc_SHARE_INFO_1_carray` wire types directly -- both now
+// live in libsmb2's split-out, unvendored libdcerpc. They were only ever the dataHandler for
+// `SMB2Client.shareEnum()` (deleted, see Context.swift), which has no other caller now that
+// `listShares()` uses `shareEnumSwift()`'s own pure-Swift parser (`MSRPC.NetShareEnumAllLevel1`) instead.
 
 extension Array where Element == SMB2FileChangeInfo {
     init(_: SMB2Client, _ dataPtr: UnsafeMutableRawPointer?) throws {

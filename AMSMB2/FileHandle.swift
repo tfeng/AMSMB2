@@ -178,7 +178,17 @@ final class SMB2FileHandle: @unchecked Sendable {
                 tv_sec: .init(stat.smb2_ctime),
                 tv_usec: .init(stat.smb2_ctime_nsec / 1000)
             ),
-            file_attributes: attributes.rawValue
+            file_attributes: attributes.rawValue,
+            // New in libsmb2 (b3d560c): raw, un-truncated 100ns Windows FILETIME values kept alongside
+            // the lossy microsecond `smb2_timeval` fields above, for a caller that DECODES a basic-info
+            // response and wants bit-exact precision. The ENCODER (`smb2_encode_file_basic_info`, used
+            // for the SET_INFO request this struct builds) only ever reads the `smb2_timeval` fields --
+            // confirmed directly in libsmb2's source -- so these 4 have no effect on the actual request
+            // and are zeroed here.
+            creation_time_raw: 0,
+            last_access_time_raw: 0,
+            last_write_time_raw: 0,
+            change_time_raw: 0
         )
         try setInfo(bfi, infoClass: .basic)
     }
